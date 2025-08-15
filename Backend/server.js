@@ -1,157 +1,299 @@
-// BotAlto – Backend/server.js  (no removals, only additions/fixes)
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const { MongoClient, ServerApiVersion } = require('mongodb');
 
 const app = express();
 app.use(express.json());
 app.use(cors({ origin: '*' }));
 app.use(express.static(path.join(__dirname, '..', 'Fronted')));
 
-// ---------- in-memory stores ----------
-let bots = {};          // { botId: {token, name, instance:Telegraf|null, status:'STOP'|'RUN'} }
-let commands = {};      // { botId: { "/start": "code", ... } }
+// MongoDB connection
+const uri = "mongodb+srv://hellokaiiddo:0Mgb6Peq3UlsNpCD@cluster0.azbh81j.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  }
+});
 
-// ---------- helper ----------
-function launchBot(botId) {
-  const botCfg = bots[botId];
-  if (!botCfg) return;
+let db;
+let activeBots = {}; // Track active bot instances
+let propertiesCollection; // For storing properties
 
-  // stop if already running
-  if (botCfg.instance) {
-    try { botCfg.instance.stop('SIGTERM'); } catch (_) {}
+async function connectToMongo() {
+  try {
+    await client.connect();
+    db = client.db("botAltoDB");
+    console.log("✅ Connected to MongoDB!");
+
+    // Initialize collections
+    botsCollection = db.collection("bots");
+    commandsCollection = db.collection("commands");
+    errorsCollection = db.collection("errors");
+    propertiesCollection = db.collection("properties"); // New collection for properties
+
+    // Start the server
+    startServer();
+  } catch (err) {
+    console.error("❌ MongoDB connection error:", err);
+    process.exit(1);
+  }
+}
+
+async function launchBot(botId) {
+  const botCfg = await botsCollection.findOne({ botId });
+  if (!botCfg) return false;
+
+  // Stop any existing instance
+  if (activeBots[botId]) {
+    try {
+      await activeBots[botId].stop('SIGTERM');
+    } catch (_) {}
+    delete activeBots[botId];
   }
 
-  botCfg.instance = new Telegraf(botCfg.token, {
+  const instance = new Telegraf(botCfg.token, {
     telegram: { timeout: 3000 },
     handlerTimeout: 9000
   });
-  registerHandlers(botCfg.instance, botId);
-  botCfg.instance.launch({ polling: { timeout: 3 } });
-  botCfg.status = 'RUN';
+
+  await registerHandlers(instance, botId);
+  instance.launch({ polling: { timeout: 3 } });
+  activeBots[botId] = instance;
+  await botsCollection.updateOne({ botId }, { $set: { status: 'RUN' } });
+  return true;
 }
 
-function stopBot(botId) {
-  const botCfg = bots[botId];
-  if (!botCfg) return;
-  if (botCfg.instance) {
-    try { botCfg.instance.stop('SIGTERM'); } catch (_) {}
-    botCfg.instance = null;
+async function stopBot(botId) {
+  if (activeBots[botId]) {
+    try {
+      await activeBots[botId].stop('SIGTERM');
+    } catch (_) {}
+    delete activeBots[botId];
   }
-  botCfg.status = 'STOP';
+  await botsCollection.updateOne({ botId }, { $set: { status: 'STOP' } });
+  return true;
 }
 
-function registerHandlers(instance, botId) {
+async function registerHandlers(instance, botId) {
   instance.context.updateTypes = [];
 
-  // /start for this bot
-  instance.command('start', ctx => {
-    const code = (commands[botId] && commands[botId]['/start']) ||
-                 "ctx.reply('🚀 BotAlto bot online!')";
-    try { new Function('ctx', code)(ctx); } catch (e) {
-      ctx.reply('⚠️ /start code error: ' + e.message);
+  // Load ONLY user-added commands from MongoDB
+  const botCommands = await commandsCollection.findOne({ botId });
+  if (botCommands && botCommands.commands) {
+    for (const cmd in botCommands.commands) {
+      const raw = cmd.replace('/', '');
+      instance.command(raw, async (ctx) => {
+        try {
+          new Function('ctx', botCommands.commands[cmd])(ctx);
+        } catch (e) {
+          ctx.reply(`⚠️ Error in command ${cmd}: ${e.message}`);
+          await storeError(botId, e.message, cmd);
+        }
+      });
     }
-  });
+  }
+}
 
-  // user commands
-  const botCmds = commands[botId] || {};
-  Object.keys(botCmds).forEach(cmd => {
-    if (cmd === '/start') return;
-    const raw = cmd.replace('/', '');
-    instance.command(raw, ctx => {
-      try { new Function('ctx', botCmds[cmd])(ctx); }
-      catch (e) { ctx.reply('⚠️ Code error: ' + e.message); }
-    });
-  });
-
-  // ping
-  instance.command('ping', ctx => {
-    const t0 = Date.now();
-    ctx.reply('🏓 Pong!').then(() => ctx.reply(`Round-trip: ${Date.now() - t0} ms`));
+async function storeError(botId, errorMessage, command) {
+  await errorsCollection.insertOne({
+    botId,
+    timestamp: new Date(),
+    message: errorMessage,
+    command: command
   });
 }
 
-// ---------- existing endpoints ----------
+// Endpoints
+app.post('/createBot', async (req, res) => {
+  const { token, name } = req.body;
+  if (!token || !name) {
+    return res.status(400).json({ ok: false, error: "Token and name are required." });
+  }
+  try {
+    const id = Math.random().toString(36).substring(2, 15);
+    await botsCollection.insertOne({
+      botId: id,
+      token,
+      name,
+      status: 'STOP',
+      createdAt: new Date()
+    });
+    await commandsCollection.insertOne({ botId: id, commands: {} });
+    res.json({ ok: true, botId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/deleteBot', async (req, res) => {
+  const { botId } = req.body;
+  if (!botId) {
+    return res.status(400).json({ ok: false, error: "botId is required." });
+  }
+  try {
+    await stopBot(botId);
+    await botsCollection.deleteOne({ botId });
+    await commandsCollection.deleteOne({ botId });
+    await errorsCollection.deleteMany({ botId });
+    await propertiesCollection.deleteMany({ botId }); // Also delete properties
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/startBot', async (req, res) => {
+  const { botId } = req.body;
+  if (!botId) {
+    return res.status(400).json({ ok: false, error: "botId is required." });
+  }
+  try {
+    const success = await launchBot(botId);
+    res.json({ ok: success });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/stopBot', async (req, res) => {
+  const { botId } = req.body;
+  if (!botId) {
+    return res.status(400).json({ ok: false, error: "botId is required." });
+  }
+  try {
+    const success = await stopBot(botId);
+    res.json({ ok: success });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/getBots', async (_, res) => {
+  try {
+    const list = await botsCollection.find({}).toArray();
+    res.json(list);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/getCommands', async (req, res) => {
+  const botId = req.query.botId;
+  if (!botId) {
+    return res.status(400).json({ ok: false, error: "botId is required." });
+  }
+  try {
+    const botCommands = await commandsCollection.findOne({ botId });
+    res.json(botCommands?.commands || {});
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/getErrors', async (req, res) => {
+  const botId = req.query.botId;
+  if (!botId) {
+    return res.status(400).json({ ok: false, error: "botId is required." });
+  }
+  try {
+    const errs = await errorsCollection.find({ botId }).toArray();
+    res.json(errs);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/addCommand', async (req, res) => {
+  const { botId, name, code } = req.body;
+  if (!botId || !name || !code) {
+    return res.status(400).json({ ok: false, error: "botId, name, and code are required." });
+  }
+  try {
+    await commandsCollection.updateOne(
+      { botId },
+      { $set: { [`commands.${name}`]: code } },
+      { upsert: true }
+    );
+
+    // Restart the bot to apply new commands
+    if (activeBots[botId]) {
+      await stopBot(botId);
+      await launchBot(botId);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/delCommand', async (req, res) => {
+  const { botId, name } = req.body;
+  if (!botId || !name) {
+    return res.status(400).json({ ok: false, error: "botId and name are required." });
+  }
+  try {
+    await commandsCollection.updateOne(
+      { botId },
+      { $unset: { [`commands.${name}`]: "" } }
+    );
+
+    // Restart the bot to remove the command
+    if (activeBots[botId]) {
+      await stopBot(botId);
+      await launchBot(botId);
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post('/setToken', async (req, res) => {
   const { token } = req.body;
+  if (!token) {
+    return res.status(400).json({ ok: false, error: "Token is required." });
+  }
   try {
     const tmp = new Telegraf(token);
     await tmp.telegram.getMe();
     const id = Math.random().toString(36).substring(2, 15);
-    bots[id] = { token, name: 'Unnamed', instance: null, status: 'STOP' };
+    await botsCollection.insertOne({
+      botId: id,
+      token,
+      name: 'Unnamed',
+      status: 'STOP',
+      createdAt: new Date()
+    });
+    await commandsCollection.insertOne({ botId: id, commands: {} });
     res.json({ ok: true, botId: id });
-  } catch { res.json({ ok: false }); }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
-app.post('/addCommand', (req, res) => {
-  const { botId, name, code } = req.body;
-  if (!bots[botId]) return res.json({ ok: false });
-  commands[botId] = commands[botId] || {};
-  commands[botId][name] = code;
-  if (bots[botId].status === 'RUN') registerHandlers(bots[botId].instance, botId);
-  res.json({ ok: true });
+app.get('/test', (req, res) => res.send('Test OK'));
+
+// Start the server
+function startServer() {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`⚡ BotAlto server on :${PORT}`));
+}
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down...');
+  for (const botId in activeBots) {
+    try {
+      await activeBots[botId].stop('SIGTERM');
+    } catch (_) {}
+  }
+  process.exit(0);
 });
 
-app.post('/delCommand', (req, res) => {
-  const { botId, name } = req.body;
-  if (!commands[botId]) return res.json({ ok: false });
-  delete commands[botId][name];
-  res.json({ ok: true });
-});
-
-// ---------- new endpoints ----------
-app.post('/createBot', (req, res) => {
-  const { token, name } = req.body;
-  try {
-    const id = Math.random().toString(36).substring(2, 15);
-    bots[id] = { token, name, instance: null, status: 'STOP' };
-    commands[id] = {};
-    res.json({ ok: true, botId: id });
-  } catch { res.json({ ok: false }); }
-});
-
-app.post('/deleteBot', (req, res) => {
-  const { botId } = req.body;
-  if (!bots[botId]) return res.json({ ok: false });
-  stopBot(botId);
-  delete bots[botId];
-  delete commands[botId];
-  res.json({ ok: true });
-});
-
-app.post('/startBot', (req, res) => {
-  const { botId } = req.body;
-  if (!bots[botId]) return res.json({ ok: false });
-  launchBot(botId);
-  res.json({ ok: true });
-});
-
-app.post('/stopBot', (req, res) => {
-  const { botId } = req.body;
-  if (!bots[botId]) return res.json({ ok: false });
-  stopBot(botId);
-  res.json({ ok: true });
-});
-
-app.get('/getBots', (_, res) => {
-  const list = Object.entries(bots).map(([id, b]) => ({
-    botId: id,
-    name: b.name,
-    status: b.status
-  }));
-  res.json(list);
-});
-
-app.get('/getCommands', (req, res) => {
-  const botId = req.query.botId;
-  if (!commands[botId]) return res.json([]);
-  res.json(commands[botId]);
-});
-
-// ---------- 24/7 ----------
-process.on('uncaughtException', console.error);
-process.on('unhandledRejection', console.error);
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`⚡ BotAlto server on :${PORT}`));
+// Connect to MongoDB and start the server
+connectToMongo();
