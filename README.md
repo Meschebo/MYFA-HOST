@@ -191,7 +191,7 @@ ctx.replyWithAudio(
 | Phase | Status | Highlights |
 |-------|--------|------------|
 | ✅ **v1.0.0** | **LIVE** | Core bot creator, hot-reload commands, start/stop per bot, zero-config |
-| 🔜 **v1.1.0** | **Next** | SQLite / MongoDB persistence → bots & commands survive restarts |
+| ✅ **v1.1.0** | **LIVE** | SQLite / MongoDB persistence → bots & commands survive restarts |
 | 🔜 **v1.2.0** | **Next** | JWT or OAuth2 login → manage only **your** bots |
 | 🔜 **v1.3.0** | **Next** | Real-time usage stats, command heat-map, webhook health |
 | 🔜 **v2.0.0** | **Future** | Plugin marketplace (AI image gen, payments, CRON, etc.) |
@@ -206,6 +206,7 @@ ctx.replyWithAudio(
 | Version | Date       | Changes                     |
 |---------|------------|-----------------------------|
 | 1.0.0   | 2025-08-02 | Initial release             |
+| 1.1.0   | 2025-08-15 | MongoDB persistence → bots & commands survive restarts            |
 
 ## Contributing
 
