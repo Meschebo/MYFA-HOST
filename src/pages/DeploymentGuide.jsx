@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ExternalLink, Terminal, Settings, CheckCircle } from 'lucide-react';
+import { ExternalLink, Terminal, Settings, CheckCircle, ArrowRight } from 'lucide-react';
 
 const DeploymentGuide = () => {
   const steps = [
@@ -14,6 +14,7 @@ const DeploymentGuide = () => {
         'You will get a public URL for your backend (e.g., https://botalto-backend.onrender.com).',
       ],
       icon: Terminal,
+      detailedGuide: "/deploy-backend-guide"
     },
     {
       title: 'Set Backend Environment Variables',
@@ -71,6 +72,11 @@ const DeploymentGuide = () => {
                       <li key={pIndex} dangerouslySetInnerHTML={{ __html: point.replace(/`([^`]+)`/g, '<code class=\"bg-gray-200 text-gray-800 font-mono px-1 py-0.5 rounded\">$1</code>') }}></li>
                     ))}
                   </ul>
+                  {step.detailedGuide && (
+                    <Link to={step.detailedGuide} className="btn-primary mt-4 text-sm">
+                      View Step-by-Step Guide <ArrowRight className="h-4 w-4" />
+                    </Link>
+                  )}
                 </div>
               </div>
             </div>

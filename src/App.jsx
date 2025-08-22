@@ -19,6 +19,7 @@ import Contact from './pages/Contact'
 import Privacy from './pages/Privacy'
 import Analytics from './pages/Analytics'
 import DeploymentGuide from './pages/DeploymentGuide'
+import RenderDeploymentGuide from './pages/RenderDeploymentGuide' // New Guide
 
 function App() {
   return (
@@ -38,6 +39,7 @@ function App() {
               <Route path="/contact" element={<Contact />} />
               <Route path="/privacy" element={<Privacy />} />
               <Route path="/deployment-guide" element={<DeploymentGuide />} />
+              <Route path="/deploy-backend-guide" element={<RenderDeploymentGuide />} /> {/* New Route */}
 
               {/* Protected Routes */}
               <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
